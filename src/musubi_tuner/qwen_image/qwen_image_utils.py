@@ -523,7 +523,10 @@ def get_qwen_prompt_embeds_with_image(
                     if captions is not None and j < len(captions):
                         caption = captions[j].strip()
                     caption_text = f"{caption} " if caption else ""
-                    base_img_prompts[i] += f"Picture {j + 1}: {caption_text}{image_token}"
+                    image_prompt = f"Picture {j + 1}: {caption_text}{image_token}"
+                    if caption:
+                        logger.info("Qwen-VL control image prompt: %s", image_prompt)
+                    base_img_prompts[i] += image_prompt
                 vl_image_inputs.extend(img)
     else:
         vl_image_inputs = None
