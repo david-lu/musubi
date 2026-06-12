@@ -47,7 +47,9 @@ class ImageDatasource(ContentDatasource):
     def __init__(self):
         super().__init__()
 
-    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, list[Image.Image]]:
+    def get_image_data(
+        self, idx: int
+    ) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]], Optional[list[str]]]:
         """
         Returns image data as a tuple of image path, image, and caption for the given index.
         Key must be unique and valid as a file name.
@@ -56,12 +58,26 @@ class ImageDatasource(ContentDatasource):
         raise NotImplementedError
 
 
+def read_control_caption(control_path: str, control_caption_extension: Optional[str]) -> str:
+    if control_caption_extension is None:
+        return ""
+
+    caption_path = os.path.splitext(control_path)[0] + control_caption_extension
+    if not os.path.exists(caption_path):
+        logger.warning(f"Control caption sidecar not found: {caption_path}")
+        return ""
+
+    with open(caption_path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
 class ImageDirectoryDatasource(ImageDatasource):
     def __init__(
         self,
         image_directory: str,
         caption_extension: Optional[str] = None,
         control_directory: Optional[str] = None,
+        control_caption_extension: Optional[str] = None,
         control_count_per_image: Optional[int] = None,
         multiple_target: bool = False,
     ):
@@ -69,6 +85,7 @@ class ImageDirectoryDatasource(ImageDatasource):
         self.image_directory = image_directory
         self.caption_extension = caption_extension
         self.control_directory = control_directory
+        self.control_caption_extension = control_caption_extension
         self.control_count_per_image = control_count_per_image
         self.multiple_target = multiple_target
         self.current_idx = 0
@@ -211,7 +228,9 @@ class ImageDirectoryDatasource(ImageDatasource):
     def __len__(self):
         return len(self.image_paths)
 
-    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
+    def get_image_data(
+        self, idx: int
+    ) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]], Optional[list[str]]]:
         image_path = self.image_paths[idx]
         image_paths = [image_path]
         if self.multiple_target:
@@ -228,15 +247,18 @@ class ImageDirectoryDatasource(ImageDatasource):
         _, caption = self.get_caption(idx)
 
         controls = None
+        control_captions = None
         if self.has_control:
             controls = []
+            control_captions = []
             for control_path in self.control_paths[image_path]:
                 control = Image.open(control_path)
                 if control.mode != "RGB" and control.mode != "RGBA":
                     control = control.convert("RGB")
                 controls.append(control)
+                control_captions.append(read_control_caption(control_path, self.control_caption_extension))
 
-        return image_path, images, caption, controls
+        return image_path, images, caption, controls, control_captions
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         image_path = self.image_paths[idx]
@@ -274,9 +296,16 @@ class ImageDirectoryDatasource(ImageDatasource):
 
 
 class ImageJsonlDatasource(ImageDatasource):
-    def __init__(self, image_jsonl_file: str, control_count_per_image: Optional[int] = None, multiple_target: bool = False):
+    def __init__(
+        self,
+        image_jsonl_file: str,
+        control_caption_extension: Optional[str] = None,
+        control_count_per_image: Optional[int] = None,
+        multiple_target: bool = False,
+    ):
         super().__init__()
         self.image_jsonl_file = image_jsonl_file
+        self.control_caption_extension = control_caption_extension
         self.control_count_per_image = control_count_per_image
         self.multiple_target = multiple_target
         self.current_idx = 0
@@ -330,7 +359,9 @@ class ImageJsonlDatasource(ImageDatasource):
     def __len__(self):
         return len(self.data)
 
-    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
+    def get_image_data(
+        self, idx: int
+    ) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]], Optional[list[str]]]:
         data = self.data[idx]
         image_path = data.get("image_path", data.get("image_path_0"))
         image_paths = [image_path]
@@ -356,8 +387,10 @@ class ImageJsonlDatasource(ImageDatasource):
         caption = data["caption"]
 
         controls = None
+        control_captions = None
         if self.has_control:
             controls = []
+            control_captions = []
             for i in range(self.control_count_per_image or 1000):  # arbitrary large number if control_count_per_image is None
                 if f"control_path_{i}" not in data:
                     break
@@ -366,8 +399,9 @@ class ImageJsonlDatasource(ImageDatasource):
                 if control.mode != "RGB" and control.mode != "RGBA":
                     control = control.convert("RGB")
                 controls.append(control)
+                control_captions.append(read_control_caption(control_path, self.control_caption_extension))
 
-        return image_path, images, caption, controls
+        return image_path, images, caption, controls, control_captions
 
     def get_caption(self, idx: int) -> tuple[str, str]:
         data = self.data[idx]

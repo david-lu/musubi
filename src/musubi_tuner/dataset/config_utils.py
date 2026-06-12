@@ -21,7 +21,7 @@ import toml
 import voluptuous
 from voluptuous import Any, ExactSequence, MultipleInvalid, Object, Schema
 
-from musubi_tuner.dataset.image_video_dataset import DatasetGroup, ImageDataset, VideoDataset
+from musubi_tuner.dataset.image_video_dataset import ControlCaptionMode, DatasetGroup, ImageDataset, VideoDataset
 
 import logging
 
@@ -47,6 +47,8 @@ class ImageDatasetParams(BaseDatasetParams):
     image_directory: Optional[str] = None
     image_jsonl_file: Optional[str] = None
     control_directory: Optional[str] = None
+    control_caption_extension: Optional[str] = None
+    control_caption_mode: ControlCaptionMode = "append"
     multiple_target: Optional[bool] = False
 
     # FramePack dependent parameters
@@ -122,6 +124,8 @@ class ConfigSanitizer:
         "image_jsonl_file": str,
         "cache_directory": str,
         "control_directory": str,
+        "control_caption_extension": str,
+        "control_caption_mode": str,
         "multiple_target": bool,
         "fp_latent_window_size": int,
         "fp_1f_clean_indices": [int],
@@ -317,6 +321,8 @@ def generate_dataset_group_by_blueprint(
         image_directory: "{dataset.image_directory}"
         image_jsonl_file: "{dataset.image_jsonl_file}"
         control_directory: "{dataset.control_directory}"
+        control_caption_extension: "{dataset.control_caption_extension}"
+        control_caption_mode: "{dataset.control_caption_mode}"
         multiple_target: {dataset.multiple_target}
         fp_latent_window_size: {dataset.fp_latent_window_size}
         fp_1f_clean_indices: {dataset.fp_1f_clean_indices}

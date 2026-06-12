@@ -37,6 +37,8 @@ def encode_and_save_batch(
 ):
     is_edit = vl_processor is not None
     prompts = [item.caption for item in batch]
+    control_image_captions = [item.control_captions or [] for item in batch] if is_edit else None
+    control_image_caption_mode = batch[0].control_caption_mode if batch else "append"
     # print(prompts)
 
     # prepare images
@@ -81,7 +83,13 @@ def encode_and_save_batch(
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
                 else:
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                        vl_processor, text_encoder, prompts, images, model_version=model_version
+                        vl_processor,
+                        text_encoder,
+                        prompts,
+                        images,
+                        model_version=model_version,
+                        control_image_captions=control_image_captions,
+                        control_image_caption_mode=control_image_caption_mode,
                     )
                 if embed.dtype == torch.float8_e4m3fn:  # T5 returns bf16, but QwenVL-2.5 returns fp8
                     embed = embed.to(torch.bfloat16)
@@ -91,7 +99,13 @@ def encode_and_save_batch(
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
             else:
                 embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                    vl_processor, text_encoder, prompts, images, model_version=model_version
+                    vl_processor,
+                    text_encoder,
+                    prompts,
+                    images,
+                    model_version=model_version,
+                    control_image_captions=control_image_captions,
+                    control_image_caption_mode=control_image_caption_mode,
                 )
 
     # save prompt cache

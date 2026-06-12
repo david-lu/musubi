@@ -88,6 +88,19 @@ def line_to_prompt_dict(line: str) -> dict:
                 prompt_dict["control_image_path"].append(control_image_path)
                 continue
 
+            m = re.match(r"cc (.+)", parg, re.IGNORECASE)
+            if m:
+                control_image_caption = m.group(1).strip()
+                if "control_image_caption" not in prompt_dict:
+                    prompt_dict["control_image_caption"] = []
+                prompt_dict["control_image_caption"].append(control_image_caption)
+                continue
+
+            m = re.match(r"ccm (append|replace)", parg, re.IGNORECASE)
+            if m:
+                prompt_dict["control_image_caption_mode"] = m.group(1).lower()
+                continue
+
             m = re.match(r"of (.+)", parg, re.IGNORECASE)
             if m:  # output folder
                 prompt_dict["one_frame"] = m.group(1).strip()

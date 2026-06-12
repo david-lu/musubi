@@ -353,6 +353,8 @@ If multiple control images are specified, the attribute names should be `control
 {"image_path": "/path/to/image2.jpg", "control_path_0": "/path/to/control2_0.png", "control_path_1": "/path/to/control2_1.png", "caption": "A caption for image2"}
 ```
 
+For Qwen-Image-Edit training, each control image can also have a caption sidecar. Set `control_caption_extension` in the image dataset config, for example `control_caption_extension = ".caption.txt"`. If the control path is `control1.png`, the caption is read from `control1.caption.txt`. For numbered-image Qwen prompts, the caption is injected inside the matching image line as `Picture N: caption <image token>`. Set `control_caption_mode = "replace"` to use only the control captions and drop the main caption; the default mode is `"append"`.
+
 The control images can also have an alpha channel. In this case, the alpha channel of the image is used as a mask for the latent. This is only for the one frame training of FramePack.
 
 <details>
@@ -365,6 +367,8 @@ The control images can also have an alpha channel. In this case, the alpha chann
 複数枚の制御画像が指定可能です。この場合、制御画像のファイル名（拡張子を除く）へ数字を付与してください。例えば、`image_dir/image1.jpg`と`control_dir/image1_0.png`, `control_dir/image1_1.png`のように指定します。`image1_0000.png`, `image1_0001.png`のように数字を4桁で指定することもできます。
 
 メタデータJSONLファイルを使用する場合は、`control_path`を追加してください。複数枚の制御画像を指定する場合は、`control_path_0`, `control_path_1`のように数字を付与してください。
+
+Qwen-Image-Editの学習では、制御画像ごとのキャプションサイドカーも使用できます。画像データセット設定に`control_caption_extension = ".caption.txt"`のように指定してください。制御画像が`control1.png`の場合、`control1.caption.txt`からキャプションを読み込み、番号付き画像のQwenプロンプトでは`Picture N: caption <image token>`として対応する画像行の中に追加します。`control_caption_mode = "replace"`を指定すると本文キャプションを使わず制御画像キャプションのみを使用します。デフォルトは`"append"`です。
 
 FramePackの単一フレーム学習では、制御画像はアルファチャンネルを持つこともできます。この場合、画像のアルファチャンネルはlatentへのマスクとして使用されます。
 

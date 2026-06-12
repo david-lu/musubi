@@ -5,7 +5,7 @@ import random
 import os
 import time
 import copy
-from typing import Tuple, Optional, List, Any, Dict
+from typing import Tuple, Optional, List, Any, Dict, cast
 
 import numpy as np
 import torch
@@ -97,6 +97,20 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="path to control (reference) image(s) for Qwen-Image-Edit, by default resized and cropped to 1M pixels keeping aspect ratio.",
+    )
+    parser.add_argument(
+        "--control_image_caption",
+        nargs="*",
+        type=str,
+        default=None,
+        help="caption(s) describing each control image for Qwen-Image-Edit text encoding, matched by order.",
+    )
+    parser.add_argument(
+        "--control_image_caption_mode",
+        type=str,
+        default="append",
+        choices=["append", "replace"],
+        help="append control image captions inside each Picture N image line, or replace the prompt with them.",
     )
     parser.add_argument(
         "--mask_path",
@@ -232,6 +246,7 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
     # Create dictionary of overrides
     overrides = {} if prompt is None else {"prompt": prompt}
     overrides["control_image_path"] = []
+    overrides["control_image_caption"] = []
 
     for part in parts:
         if not part.strip():
@@ -259,6 +274,13 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
             overrides["negative_prompt"] = value
         elif option == "ci":  # control_image_path
             overrides["control_image_path"].append(value)
+        elif option == "cc":  # control_image_caption
+            overrides["control_image_caption"].append(value)
+        elif option == "ccm":
+            value = value.lower()
+            if value not in {"append", "replace"}:
+                raise ValueError(f"control_image_caption_mode must be 'append' or 'replace', got: {value}")
+            overrides["control_image_caption_mode"] = value
         elif option == "rcm_th":
             overrides["rcm_threshold"] = float(value)
         elif option == "rcm_rel_th":
@@ -271,6 +293,8 @@ def parse_prompt_line(line: str) -> Dict[str, Any]:
     # If no control_image_path was provided, remove the empty list
     if not overrides["control_image_path"]:
         del overrides["control_image_path"]
+    if not overrides["control_image_caption"]:
+        del overrides["control_image_caption"]
 
     return overrides
 
@@ -591,12 +615,25 @@ def prepare_text_inputs(
 
         text_encoder.to(vl_device)  # If text_encoder_cpu is True, this will be CPU
 
-    def get_embeds(p: str, ims: Optional[List[np.ndarray]]) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_embeds(
+        p: str,
+        ims: Optional[List[np.ndarray]],
+        captions: Optional[List[str]],
+        caption_mode: qwen_image_utils.ControlCaptionMode,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not args.is_edit:  # original or layered generation without image input
+            if ims is not None:
+                p = qwen_image_utils.apply_control_image_captions(p, captions, caption_mode)
             return qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
         else:
             return qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                vl_processor, text_encoder, p, ims, model_version=args.model_version
+                vl_processor,
+                text_encoder,
+                p,
+                ims,
+                model_version=args.model_version,
+                control_image_captions=captions,
+                control_image_caption_mode=caption_mode,
             )
 
     logger.info(f"Encoding prompt with Text Encoder. Control images: {len(images) if images is not None else None}")
@@ -609,29 +646,54 @@ def prepare_text_inputs(
         prompt = qwen_image_utils.get_image_caption(vl_processor, text_encoder, images, use_en_prompt=use_en)
         logger.info(f"Generated automatic prompt for layered images: {prompt}")
 
+    control_image_captions = args.control_image_caption
+    if isinstance(control_image_captions, str):
+        control_image_captions = [control_image_captions]
+    if control_image_captions is not None:
+        if args.control_image_path is None or len(args.control_image_path) == 0:
+            raise ValueError("control_image_caption requires control_image_path")
+        if len(control_image_captions) > len(args.control_image_path):
+            raise ValueError(
+                "control_image_caption has more entries than control_image_path "
+                f"({len(control_image_captions)} > {len(args.control_image_path)})"
+            )
+    control_image_caption_mode = cast(qwen_image_utils.ControlCaptionMode, args.control_image_caption_mode)
+
     # cache_key includes this because embed may be changed if resize_control_to_image_size is True
     height, width = check_inputs(args)
-    cache_key = (prompt, tuple(args.control_image_path) if args.control_image_path is not None else None, (width, height))
+    cache_key = (
+        prompt,
+        tuple(args.control_image_path) if args.control_image_path is not None else None,
+        tuple(control_image_captions) if control_image_captions is not None else None,
+        control_image_caption_mode,
+        (width, height),
+    )
 
     if cache_key in conds_cache:
         embed, mask = conds_cache[cache_key]
     else:
         move_models_to_device_if_needed()
 
-        embed, mask = get_embeds(prompt, images)
+        embed, mask = get_embeds(prompt, images, control_image_captions, control_image_caption_mode)
         embed = embed.cpu()
         mask = mask.cpu()
 
         conds_cache[cache_key] = (embed, mask)
 
     negative_prompt = args.negative_prompt
-    cache_key = (negative_prompt, tuple(args.control_image_path) if args.control_image_path is not None else None, (width, height))
+    cache_key = (
+        negative_prompt,
+        tuple(args.control_image_path) if args.control_image_path is not None else None,
+        tuple(control_image_captions) if control_image_captions is not None else None,
+        control_image_caption_mode,
+        (width, height),
+    )
     if cache_key in conds_cache:
         negative_embed, negative_mask = conds_cache[cache_key]
     else:
         move_models_to_device_if_needed()
 
-        negative_embed, negative_mask = get_embeds(negative_prompt, images)
+        negative_embed, negative_mask = get_embeds(negative_prompt, images, control_image_captions, control_image_caption_mode)
         negative_embed = negative_embed.cpu()
         negative_mask = negative_mask.cpu()
 

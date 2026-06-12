@@ -3,12 +3,13 @@ import glob
 import os
 import random
 import time
-from typing import Any, Optional, Sequence, Tuple, Union, TYPE_CHECKING
+from typing import Any, Literal, Optional, Sequence, Tuple, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from multiprocessing.sharedctypes import Synchronized
 
 SharedEpoch = Optional["Synchronized[int]"]
+ControlCaptionMode = Literal["append", "replace"]
 
 
 import numpy as np
@@ -63,6 +64,8 @@ class ItemInfo:
 
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
+        self.control_captions: Optional[list[str]] = None
+        self.control_caption_mode: ControlCaptionMode = "append"
 
         # FramePack architecture specific
         self.fp_latent_window_size: Optional[int] = None
@@ -76,7 +79,8 @@ class ItemInfo:
             + f"original_size={self.original_size}, bucket_size={self.bucket_size}, "
             + f"frame_count={self.frame_count}, latent_cache_path={self.latent_cache_path}, "
             + f"content={[c.shape for c in self.content] if isinstance(self.content, list) else (self.content.shape if self.content is not None else None)}), "
-            + f"control_content={[cc.shape for cc in self.control_content] if isinstance(self.control_content, list) else (self.control_content.shape if self.control_content is not None else None)})"
+            + f"control_content={[cc.shape for cc in self.control_content] if isinstance(self.control_content, list) else (self.control_content.shape if self.control_content is not None else None)}, "
+            + f"control_captions={self.control_captions}, control_caption_mode={self.control_caption_mode})"
         )
 
 
@@ -277,6 +281,8 @@ class ImageDataset(BaseDataset):
         image_directory: Optional[str] = None,
         image_jsonl_file: Optional[str] = None,
         control_directory: Optional[str] = None,
+        control_caption_extension: Optional[str] = None,
+        control_caption_mode: ControlCaptionMode = "append",
         cache_directory: Optional[str] = None,
         multiple_target: bool = False,
         fp_latent_window_size: Optional[int] = 9,
@@ -302,6 +308,10 @@ class ImageDataset(BaseDataset):
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
         self.control_directory = control_directory
+        self.control_caption_extension = control_caption_extension
+        if control_caption_mode not in {"append", "replace"}:
+            raise ValueError(f"control_caption_mode must be 'append' or 'replace', got: {control_caption_mode}")
+        self.control_caption_mode = control_caption_mode
         self.multiple_target = multiple_target
         self.fp_latent_window_size = fp_latent_window_size
         self.fp_1f_clean_indices = fp_1f_clean_indices
@@ -331,10 +341,20 @@ class ImageDataset(BaseDataset):
 
         if image_directory is not None:
             self.datasource = ImageDirectoryDatasource(
-                image_directory, caption_extension, control_directory, control_count_per_image, multiple_target
+                image_directory,
+                caption_extension,
+                control_directory,
+                control_caption_extension,
+                control_count_per_image,
+                multiple_target,
             )
         elif image_jsonl_file is not None:
-            self.datasource = ImageJsonlDatasource(image_jsonl_file, control_count_per_image, multiple_target)
+            self.datasource = ImageJsonlDatasource(
+                image_jsonl_file,
+                control_caption_extension,
+                control_count_per_image,
+                multiple_target,
+            )
         else:
             raise ValueError("image_directory or image_jsonl_file must be specified")
 
@@ -353,6 +373,9 @@ class ImageDataset(BaseDataset):
             metadata["image_jsonl_file"] = os.path.basename(self.image_jsonl_file)
         if self.control_directory is not None:
             metadata["control_directory"] = os.path.basename(self.control_directory)
+        if self.control_caption_extension is not None:
+            metadata["control_caption_extension"] = self.control_caption_extension
+        metadata["control_caption_mode"] = self.control_caption_mode
         metadata["has_control"] = self.has_control
         return metadata
 
@@ -378,7 +401,7 @@ class ImageDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_size, item_key, images, caption, controls = future.result()
+                    original_size, item_key, images, caption, controls, control_captions = future.result()
                     image = images[0]  # use the first image as the main content
                     bucket_height, bucket_width = image.shape[:2]
                     bucket_reso = (bucket_width, bucket_height)
@@ -406,6 +429,8 @@ class ImageDataset(BaseDataset):
 
                     if controls is not None:
                         item_info.control_content = controls
+                        item_info.control_captions = control_captions
+                        item_info.control_caption_mode = self.control_caption_mode
                         # Add every control size to bucket_reso so that different control resolutions AND a
                         # different number of control images go to different batches. Run this whenever control
                         # data is present (not only for no_resize_control / control_resolution): otherwise items
@@ -436,8 +461,17 @@ class ImageDataset(BaseDataset):
 
         for fetch_op in self.datasource:
             # fetch and resize image in a separate thread
-            def fetch_and_resize(op: callable) -> tuple[tuple[int, int], str, Image.Image, str, Optional[Image.Image]]:
-                image_key, images, caption, controls = op()
+            def fetch_and_resize(
+                op: callable,
+            ) -> tuple[
+                tuple[int, int],
+                str,
+                list[np.ndarray],
+                str,
+                Optional[list[np.ndarray]],
+                Optional[list[str]],
+            ]:
+                image_key, images, caption, controls, control_captions = op()
                 images: list[Image.Image]
                 image: Image.Image = images[0]  # use the first image as the main content
                 image_size = image.size
@@ -478,7 +512,7 @@ class ImageDataset(BaseDataset):
                             resized_control = resize_image_to_bucket(control, bucket_reso)
                             resized_controls.append(resized_control)
 
-                return image_size, image_key, images, caption, resized_controls
+                return image_size, image_key, images, caption, resized_controls, control_captions
 
             future = executor.submit(fetch_and_resize, fetch_op)
             futures.append(future)

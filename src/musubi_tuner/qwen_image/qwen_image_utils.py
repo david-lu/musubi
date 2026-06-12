@@ -12,7 +12,7 @@ from accelerate import init_empty_weights
 from diffusers.utils.torch_utils import randn_tensor
 from PIL import Image
 
-from musubi_tuner.dataset.image_video_dataset import BucketSelector, ARCHITECTURE_QWEN_IMAGE_EDIT
+from musubi_tuner.dataset.image_video_dataset import BucketSelector, ControlCaptionMode, ARCHITECTURE_QWEN_IMAGE_EDIT
 from musubi_tuner.flux.flux_utils import is_fp8
 from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import AutoencoderKLQwenImage
 from musubi_tuner.utils import image_utils
@@ -378,12 +378,65 @@ def get_qwen_prompt_embeds(
     return prompt_embeds, encoder_attention_mask
 
 
+def apply_control_image_captions(
+    prompt: Optional[str],
+    control_image_captions: Optional[List[str]],
+    mode: ControlCaptionMode = "append",
+) -> Optional[str]:
+    if mode not in {"append", "replace"}:
+        raise ValueError(f"control image caption mode must be 'append' or 'replace', got: {mode}")
+
+    if not control_image_captions:
+        return prompt
+
+    lines = []
+    for i, caption in enumerate(control_image_captions):
+        caption = caption.strip()
+        if caption:
+            lines.append(f"Picture {i + 1}: {caption}")
+
+    if not lines:
+        return prompt
+
+    if mode == "replace":
+        return "\n".join(lines)
+
+    if prompt is not None and prompt.strip():
+        lines.append(prompt)
+    return "\n".join(lines)
+
+
+def _normalize_control_image_caption_groups(
+    control_image_captions: Optional[Union[List[str], List[List[str]]]],
+    prompt_count: int,
+) -> Optional[List[List[str]]]:
+    if control_image_captions is None:
+        return None
+    if len(control_image_captions) == 0:
+        return [[] for _ in range(prompt_count)]
+    if isinstance(control_image_captions[0], list):
+        caption_groups = control_image_captions
+        assert len(caption_groups) == prompt_count, (
+            f"Number of control image caption groups {len(caption_groups)} must match number of prompts {prompt_count}."
+        )
+        return [list(group) for group in caption_groups]
+
+    assert prompt_count == 1, "Control image captions must be a list of lists when multiple prompts are provided."
+    return [list(control_image_captions)]
+
+
+def _has_control_image_caption(captions: List[str]) -> bool:
+    return any(caption.strip() for caption in captions)
+
+
 def get_qwen_prompt_embeds_with_image(
     vl_processor: Qwen2VLProcessor,
     vlm: Qwen2_5_VLForConditionalGeneration,
     prompt: Union[str, List[str]],
     image: Union[List[ImageInput], ImageInput] = None,
     model_version: str = "edit",
+    control_image_captions: Optional[Union[List[str], List[List[str]]]] = None,
+    control_image_caption_mode: ControlCaptionMode = "append",
 ):
     r"""
     Args:
@@ -405,6 +458,15 @@ def get_qwen_prompt_embeds_with_image(
     dtype = vlm.dtype
 
     prompt = [prompt] if isinstance(prompt, str) else prompt
+    caption_groups = _normalize_control_image_caption_groups(control_image_captions, len(prompt))
+    if caption_groups is not None:
+        if model_version == "edit":
+            prompt = [
+                apply_control_image_captions(p, captions, control_image_caption_mode)
+                for p, captions in zip(prompt, caption_groups)
+            ]
+        elif control_image_caption_mode == "replace":
+            prompt = ["" if _has_control_image_caption(captions) else p for p, captions in zip(prompt, caption_groups)]
 
     if isinstance(image, list):
         if len(image) == 0:
@@ -451,12 +513,17 @@ def get_qwen_prompt_embeds_with_image(
                     )
                 vl_image_inputs.append(img[0])
         else:
-            img_prompt_template = "Picture {}: <|vision_start|><|image_pad|><|vision_end|>"
+            image_token = "<|vision_start|><|image_pad|><|vision_end|>"
             for i, img in enumerate(image):
                 if img is None or len(img) == 0:
                     continue
+                captions = caption_groups[i] if caption_groups is not None else None
                 for j in range(len(img)):
-                    base_img_prompts[i] += img_prompt_template.format(j + 1)
+                    caption = ""
+                    if captions is not None and j < len(captions):
+                        caption = captions[j].strip()
+                    caption_text = f"{caption} " if caption else ""
+                    base_img_prompts[i] += f"Picture {j + 1}: {caption_text}{image_token}"
                 vl_image_inputs.extend(img)
     else:
         vl_image_inputs = None

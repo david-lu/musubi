@@ -1,6 +1,6 @@
 import argparse
 import gc
-from typing import Optional
+from typing import Optional, cast
 
 
 import numpy as np
@@ -98,12 +98,36 @@ class QwenImageNetworkTrainer(NetworkTrainer):
         # Encode with VLM
         logger.info("Encoding with VLM")
 
-        sample_prompts_te_outputs = {}  # prompt -> embed, or (prompt, control_image_path) -> embed
+        sample_prompts_te_outputs = {}  # prompt -> embed, or (prompt, control_image_path, control_image_caption) -> embed
         control_image_nps = {}  # (control_image_path) -> control_image_np
 
-        def embed_key_fn(p, ctrl_img_paths):
-            nonlocal is_edit
-            return p if not is_edit else (p, tuple(ctrl_img_paths) if ctrl_img_paths is not None else None)
+        def get_control_image_captions(prompt_dict, control_image_paths):
+            control_image_captions = prompt_dict.get("control_image_caption")
+            if isinstance(control_image_captions, str):
+                control_image_captions = [control_image_captions]
+            if control_image_captions is not None and control_image_paths is not None:
+                if len(control_image_captions) > len(control_image_paths):
+                    raise ValueError(
+                        "control_image_caption has more entries than control_image_path "
+                        f"({len(control_image_captions)} > {len(control_image_paths)})"
+                    )
+            return control_image_captions
+
+        def get_control_image_caption_mode(prompt_dict) -> qwen_image_utils.ControlCaptionMode:
+            mode = prompt_dict.get("control_image_caption_mode", "append")
+            if mode not in {"append", "replace"}:
+                raise ValueError(f"control_image_caption_mode must be 'append' or 'replace', got: {mode}")
+            return cast(qwen_image_utils.ControlCaptionMode, mode)
+
+        def embed_key_fn(p, ctrl_img_paths, ctrl_img_captions, ctrl_img_caption_mode):
+            if ctrl_img_paths is None:
+                return p
+            return (
+                p,
+                tuple(ctrl_img_paths),
+                tuple(ctrl_img_captions) if ctrl_img_captions is not None else None,
+                ctrl_img_caption_mode,
+            )
 
         with torch.amp.autocast(device_type=device.type, dtype=vl_dtype), torch.no_grad():
             for prompt_dict in prompts:
@@ -126,6 +150,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                     resize_size = None if resize_to_official else (width, height)
 
                     control_image_paths = prompt_dict["control_image_path"]
+                    control_image_captions = get_control_image_captions(prompt_dict, control_image_paths)
+                    control_image_caption_mode = get_control_image_caption_mode(prompt_dict)
                     control_image_tensors = []
                     for control_image_path in control_image_paths:
                         control_image_tensor, control_image_np, _ = qwen_image_utils.preprocess_control_image(
@@ -140,6 +166,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                     prompt_dict["control_image_tensors"] = control_image_tensors
                 else:
                     control_image_paths, control_image_tensors = None, None
+                    control_image_captions = None
+                    control_image_caption_mode = "append"
 
                 if "negative_prompt" not in prompt_dict:
                     prompt_dict["negative_prompt"] = " "
@@ -152,14 +180,25 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                     prompt_dict["prompt"] = prompt
 
                 for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", " ")]:
-                    embed_key = embed_key_fn(p, control_image_paths)
+                    embed_key = embed_key_fn(p, control_image_paths, control_image_captions, control_image_caption_mode)
                     if p is None or embed_key in sample_prompts_te_outputs:
                         continue
 
                     # encode prompt with image if available
                     logger.info(f"cache Text Encoder outputs for prompt: {p} with image: {control_image_paths}")
                     if not is_edit:
-                        embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, p)
+                        prompt_with_control_captions = (
+                            qwen_image_utils.apply_control_image_captions(
+                                p,
+                                control_image_captions,
+                                control_image_caption_mode,
+                            )
+                            if control_image_paths is not None
+                            else p
+                        )
+                        embed, mask = qwen_image_utils.get_qwen_prompt_embeds(
+                            tokenizer, text_encoder, prompt_with_control_captions
+                        )
                     else:
                         embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
                             vl_processor,
@@ -167,6 +206,8 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                             p,
                             [control_image_nps[c] for c in control_image_paths],
                             model_version=args.model_version,
+                            control_image_captions=control_image_captions,
+                            control_image_caption_mode=control_image_caption_mode,
                         )
                     txt_len = mask.to(dtype=torch.bool).sum().item()  # length of the text in the batch
                     embed = embed[:, :txt_len]
@@ -184,14 +225,22 @@ class QwenImageNetworkTrainer(NetworkTrainer):
                 if "control_image_path" not in prompt_dict or len(prompt_dict["control_image_path"]) == 0:
                     is_edit = False
             prompt_dict_copy = prompt_dict.copy()
-            control_image_paths = None if not is_edit else prompt_dict_copy["control_image_path"]
+            control_image_paths = (
+                prompt_dict_copy["control_image_path"] if is_edit or self.is_layered else None
+            )
+            control_image_captions = (
+                None if control_image_paths is None else get_control_image_captions(prompt_dict, control_image_paths)
+            )
+            control_image_caption_mode = (
+                "append" if control_image_paths is None else get_control_image_caption_mode(prompt_dict)
+            )
 
             p = prompt_dict.get("prompt", "")
-            embed_key = embed_key_fn(p, control_image_paths)
+            embed_key = embed_key_fn(p, control_image_paths, control_image_captions, control_image_caption_mode)
             prompt_dict_copy["vl_embed"] = sample_prompts_te_outputs[embed_key]
 
             p = prompt_dict.get("negative_prompt", " ")
-            embed_key = embed_key_fn(p, control_image_paths)
+            embed_key = embed_key_fn(p, control_image_paths, control_image_captions, control_image_caption_mode)
             prompt_dict_copy["negative_vl_embed"] = sample_prompts_te_outputs[embed_key]
 
             sample_parameters.append(prompt_dict_copy)
